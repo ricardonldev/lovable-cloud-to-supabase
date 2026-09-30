@@ -1,0 +1,39 @@
+name: tests
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  unit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: node --test tests/migration.test.mjs
+
+  rehearsal:
+    # Full move on a local Supabase in Docker: old project -> export -> new project -> checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: supabase/setup-cli@v1
+        with:
+          version: latest
+      - run: supabase init --force
+      - run: supabase start -x studio,realtime,imgproxy,edge-runtime,logflare,vector,supavisor,mailpit,postgres-meta
+      - run: node rehearsal/rehearse.mjs --out rehearsal-report.md
+      - if: always()
+        run: cat rehearsal-report.md >> "$GITHUB_STEP_SUMMARY"
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rehearsal-report
+          path: rehearsal-report.md
