@@ -1,0 +1,7 @@
+node_modules/
+.rehearsal/
+rehearsal-report.md
+/supabase/
+*.dump
+export*.sql
+data*.sql

@@ -1,0 +1,1 @@
+{ "name": "old-style-app", "dependencies": { "@supabase/supabase-js": "^2.50.0", "@lovable.dev/cloud-auth-js": "^1.1.2", "vite": "^5.0.0" } }

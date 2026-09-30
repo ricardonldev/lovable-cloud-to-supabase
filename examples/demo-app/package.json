@@ -1,0 +1,9 @@
+{
+  "name": "demo-bookings-app",
+  "private": true,
+  "description": "Made-up example app (Lovable-style, TanStack Start + Supabase) used to rehearse the migration. No real data.",
+  "dependencies": {
+    "@supabase/supabase-js": "^2.58.0",
+    "@tanstack/react-start": "^1.130.0"
+  }
+}

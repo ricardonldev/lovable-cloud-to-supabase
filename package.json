@@ -1,0 +1,12 @@
+{
+  "name": "lovable-cloud-to-supabase",
+  "version": "1.0.0",
+  "description": "Tested toolkit to move a Lovable app from Lovable Cloud to your own Supabase project: schema, data, users with their passwords, storage files, and a completeness check.",
+  "license": "MIT",
+  "private": true,
+  "engines": { "node": ">=20" },
+  "scripts": {
+    "test": "node --test tests/migration.test.mjs",
+    "rehearsal": "node rehearsal/rehearse.mjs --out rehearsal-report.md"
+  }
+}
