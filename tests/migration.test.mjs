@@ -7,7 +7,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { analyze, planMarkdown, combinedSchema, findMigrations } from '../plan-migration.mjs';
+import { analyze, planMarkdown, combinedSchema, findMigrations, jwtToml } from '../plan-migration.mjs';
 import { extract } from '../extract-data.mjs';
 import { parseSnapshot, compare, report } from '../compare-counts.mjs';
 import { listUploads, authHeaders, upload } from '../upload-storage.mjs';
@@ -68,6 +68,27 @@ test('plan: combined schema keeps the order and marks each file', () => {
   const s = combinedSchema(old);
   assert.ok(s.indexOf('1/2: supabase/migrations/20251008155159_first.sql') < s.indexOf('2/2: supabase/migrations/20251008155215_second.sql'));
   assert.match(s, /CREATE TABLE public\.notes/);
+});
+test('plan: functions without a verify_jwt entry get Lovable\'s default (false) as config.toml entries', () => {
+  const dir = join(tmp, 'jwt');
+  for (const n of ['stripe-webhook', 'private-thing', 'public-thing']) {
+    mkdirSync(join(dir, 'supabase', 'functions', n), { recursive: true });
+    writeFileSync(join(dir, 'supabase', 'functions', n, 'index.ts'), 'Deno.serve(() => new Response("ok"))');
+  }
+  writeFileSync(join(dir, 'package.json'), '{}');
+  writeFileSync(join(dir, 'supabase', 'config.toml'), 'project_id = "abcdefghijklmnopqrst"\n[functions]\n  [functions.private-thing]\n    verify_jwt = true\n  [functions.public-thing]\n    verify_jwt = false\n');
+  const a = analyze(dir);
+  assert.deepEqual(a.jwtDefault, ['stripe-webhook']);
+  assert.equal(jwtToml(a), '[functions.stripe-webhook]\nverify_jwt = false\n');
+  assert.match(planMarkdown(a), /Lovable runs them with verify_jwt = false/);
+});
+test('plan: app code that checks the address against its own list of hosts is flagged', () => {
+  const dir = join(tmp, 'hosts');
+  mkdirSync(join(dir, 'src'), { recursive: true });
+  writeFileSync(join(dir, 'package.json'), '{}');
+  writeFileSync(join(dir, 'src', 'App.tsx'), "const main = location.hostname.includes('lovable.app') || location.hostname.includes('myapp.com');");
+  writeFileSync(join(dir, 'src', 'other.ts'), 'export const host = location.hostname;');
+  assert.deepEqual(analyze(dir).hostLists, ['src/App.tsx']);
 });
 test('plan: a repo without migrations is a blocker in the plan', () => {
   const dir = join(tmp, 'nomig');

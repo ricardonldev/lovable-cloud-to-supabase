@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 // Migration plan for moving a Lovable app from Lovable Cloud (built-in backend) to your own Supabase project.
-// Usage: node plan-migration.mjs <repo> [--out plan.md] [--schema schema.sql]
-//   --schema  writes every migration, in the order they must run, into one SQL file for the new project
+// Usage: node plan-migration.mjs <repo> [--out plan.md] [--schema schema.sql] [--jwt-toml jwt.toml]
+//   --schema    writes every migration, in the order they must run, into one SQL file for the new project
+//   --jwt-toml  writes the config.toml entries that keep Lovable's verify_jwt = false for functions without one
 //
 // Read-only: it never runs code from the repo and never prints secret values (only variable names).
 // Based on Lovable's official guide: https://docs.lovable.dev/tips-tricks/external-deployment-hosting
@@ -95,6 +96,9 @@ export function analyze(repo) {
   }
   const config = existsSync(join(repo, 'supabase', 'config.toml')) ? read(join(repo, 'supabase', 'config.toml')) : '';
   const noJwt = [...config.matchAll(/\[functions\.([\w-]+)\][^[]*?verify_jwt\s*=\s*false/g)].map((m) => m[1]);
+  // Lovable deploys a function that has no entry here with verify_jwt = false; the Supabase CLI defaults to true
+  const jwtSet = new Set([...config.matchAll(/\[functions\.([\w-]+)\][^[]*?verify_jwt\s*=\s*(?:true|false)/g)].map((m) => m[1]));
+  const jwtDefault = functions.map((f) => f.name).filter((n) => !jwtSet.has(n));
 
   // App code: env vars, auth methods and Lovable-only services
   const code = files.filter((f) => CODE.test(f) && !rel(f).startsWith('supabase/functions/'));
@@ -116,9 +120,16 @@ export function analyze(repo) {
   // Lovable Jobs call server routes protected with LOVABLE_CRON_SECRET: outside Lovable nobody calls them
   const lovableJobs = code.filter((f) => /authenticateCronRequest\s*\(/.test(read(f)) && !/cron-auth\.[jt]s$/.test(f)).map(rel);
   const hardcodedRefs = [...new Set(code.flatMap((f) => [...read(f).matchAll(/https:\/\/([a-z]{20})\.supabase\.co/g)].map(() => rel(f))))];
+  // Code that picks what to show from the address it runs on (main site, partner or tenant pages): new hosts go on its list
+  const hostLists = code.filter((f) => { const s = read(f); return /location\.hostname/.test(s) && /lovable\.app|lovableproject\.com/.test(s); }).map(rel);
   const tanstack = Boolean(deps['@tanstack/react-start'] || deps['@lovable.dev/vite-tanstack-config']);
 
-  return { repo: basename(repo), mig: { ...mig, files: mig.files.map(rel) }, migAbs: mig.files, buckets, extensions, cronJobs, realtime, authTriggers, vault, netHttp, functions, noJwt, supabaseVars, serverVars, auth, lovableAi, lovableJobs, seededTables, hardcodedRefs, tanstack, projectId: (config.match(/^\s*project_id\s*=\s*"([^"]+)"/m) || [])[1] || null };
+  return { repo: basename(repo), mig: { ...mig, files: mig.files.map(rel) }, migAbs: mig.files, buckets, extensions, cronJobs, realtime, authTriggers, vault, netHttp, functions, noJwt, jwtDefault, hostLists, supabaseVars, serverVars, auth, lovableAi, lovableJobs, seededTables, hardcodedRefs, tanstack, projectId: (config.match(/^\s*project_id\s*=\s*"([^"]+)"/m) || [])[1] || null };
+}
+
+/** config.toml entries that keep Lovable's verify_jwt = false for the functions that have no entry. */
+export function jwtToml(a) {
+  return a.jwtDefault.map((n) => `[functions.${n}]\nverify_jwt = false\n`).join('');
 }
 
 /** All migrations in order, in one file, with a header per migration. */
@@ -138,6 +149,8 @@ export function planMarkdown(a) {
   L.push(`| Migrations | ${a.mig.system ? `${a.mig.files.length} in \`${a.mig.dir}\` (${a.mig.system}${a.mig.system === 'drizzle' ? a.mig.journalUsed ? ', order from meta/_journal.json' : ', order from file names: CHECK IT' : ''})` : '**none**'} | ${a.mig.system ? 'They rebuild the schema on the new project (tables, RLS policies, functions, triggers)' : '**Blocker:** the schema only exists in the Cloud database. Restore it from the full export instead of from migrations'} |`);
   L.push(`| Storage buckets | ${a.buckets.length ? a.buckets.map((b) => `\`${b.id}\`${b.public ? ' (public)' : ''}`).join(', ') : 'none in migrations'} | Buckets come with the schema; the **files** are not in the database export: download them from More → Cloud → Storage and upload them again |`);
   L.push(`| Edge Functions | ${a.functions.length ? a.functions.map((f) => `\`${f.name}\``).join(', ') : 'none'} | Deploy with \`supabase functions deploy\`; set their secrets on the new project${a.noJwt.length ? `. Public (verify_jwt = false): ${a.noJwt.join(', ')}` : ''} |`);
+  L.push(`| Functions without a verify_jwt entry | ${a.jwtDefault.length ? `${a.jwtDefault.length}: ${a.jwtDefault.slice(0, 12).map((n) => `\`${n}\``).join(', ')}${a.jwtDefault.length > 12 ? ', …' : ''}` : 'none'} | ${a.jwtDefault.length ? '**Lovable runs them with verify_jwt = false, the Supabase CLI with true.** Without an entry, webhooks (Stripe…), email links and public endpoints get 401 after the move. Append the `--jwt-toml` entries to `supabase/config.toml` before deploying, then call one webhook without a token on both projects: same answer, not 401' : '—'} |`);
+  L.push(`| Address checks in the app | ${a.hostLists.join(', ') || 'none'} | ${a.hostLists.length ? 'The app compares `location.hostname` with its own list (it includes lovable.app). Add the new domain and the test address, or it may treat them as unknown (partner or tenant pages)' : '—'} |`);
   const secrets = [...new Set(a.functions.flatMap((f) => f.secrets))];
   L.push(`| Function secrets | ${secrets.length ? secrets.map((s) => `\`${s}\``).join(', ') : 'none'} | The client creates them again (Edge Functions → Secrets). Never sent by chat |`);
   L.push(`| Extensions | ${a.extensions.join(', ') || 'none declared'} | Enable any missing one in Database → Extensions before running the schema |`);
@@ -160,7 +173,7 @@ export function planMarkdown(a) {
     ['Client', 'Create the new Supabase project (same region as the users). Invite the developer to it while it is still empty.'],
     ['Developer', `Run the schema on the empty project: \`schema.sql\`${a.mig.system === 'supabase' ? ' or `supabase link` + `supabase db push`' : ''}. Enable extensions first if it fails.`],
     ['Developer', 'Configure Auth on the new project: site URL, redirect URLs, email templates and SMTP, sign-in providers (with the client\'s OAuth apps).'],
-    ['Developer', secrets.length || a.functions.length ? 'Deploy the Edge Functions; the client adds their secrets.' : 'No Edge Functions to deploy.'],
+    ['Developer', secrets.length || a.functions.length ? `Deploy the Edge Functions${a.jwtDefault.length ? ' (append the `--jwt-toml` entries to config.toml first)' : ''}; the client adds their secrets.` : 'No Edge Functions to deploy.'],
     ['Client', 'In Lovable: More → Cloud → Overview → Advanced settings → Export project data → Database → Export. Download it (email link or More → Cloud → Storage). One export every 24 h.'],
     ['Client', a.buckets.length ? 'Download the storage files of every bucket (More → Cloud → Storage).' : 'No storage files to move (check More → Cloud → Storage anyway).'],
     ['Client (or developer with a signed data processing agreement)', 'Extract the data from the export (`extract-data.mjs`) and import it into the new project with triggers disabled.'],
@@ -180,8 +193,8 @@ export function planMarkdown(a) {
 
 if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
   const args = process.argv.slice(2);
-  const repo = args.find((x, i) => !x.startsWith('--') && !['--out', '--schema'].includes(args[i - 1]));
-  if (!repo || !existsSync(repo)) { console.error('Usage: node plan-migration.mjs <repo> [--out plan.md] [--schema schema.sql]'); process.exit(2); }
+  const repo = args.find((x, i) => !x.startsWith('--') && !['--out', '--schema', '--jwt-toml'].includes(args[i - 1]));
+  if (!repo || !existsSync(repo)) { console.error('Usage: node plan-migration.mjs <repo> [--out plan.md] [--schema schema.sql] [--jwt-toml jwt.toml]'); process.exit(2); }
   const a = analyze(repo);
   const md = planMarkdown(a);
   const oi = args.indexOf('--out');
@@ -191,5 +204,7 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
     if (!a.migAbs.length) { console.error('No migrations found: cannot build schema.sql'); process.exit(1); }
     writeFileSync(args[si + 1], combinedSchema(a));
   }
+  const ji = args.indexOf('--jwt-toml');
+  if (ji !== -1) writeFileSync(args[ji + 1], jwtToml(a));
   process.stdout.write(md);
 }
