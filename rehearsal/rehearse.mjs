@@ -78,8 +78,27 @@ const USERS = [
   { email: 'owner@example.com', password: 'Rehearsal-Owner-3!', name: 'Owner Example' },
 ];
 
+// After a reset the CLI restarts the API services, and since storage-api 1.8x Storage takes a while to come
+// back: wait until Auth and Storage answer before using them (otherwise uploads fail with "fetch failed").
+async function ready(timeoutMs = 120000) {
+  const end = Date.now() + timeoutMs;
+  for (;;) {
+    const e = env();
+    try {
+      const [auth, storage] = await Promise.all([
+        fetch(`${e.API_URL}/auth/v1/health`, { headers: { apikey: e.ANON_KEY } }),
+        fetch(`${e.API_URL}/storage/v1/bucket`, { headers: { apikey: e.SERVICE_ROLE_KEY, Authorization: `Bearer ${e.SERVICE_ROLE_KEY}` } }),
+      ]);
+      if (auth.ok && storage.ok) return;
+    } catch { /* still restarting */ }
+    if (Date.now() > end) throw new Error('Auth or Storage did not come back after the reset');
+    await new Promise((r) => setTimeout(r, 2000));
+  }
+}
+
 async function newProject(schemaSql, dataFile, label, { expectFail = false } = {}) {
   reset();
+  await ready();
   const s = psql(schemaSql);
   if (s.code) { log(false, `${label}: schema on the new project`, firstError(s.err)); return null; }
   const d = psql(readFileSync(dataFile, 'utf8'), '--single-transaction');
@@ -95,6 +114,7 @@ try {
   writeFileSync(join(work, 'schema.sql'), schemaSql);
   log(a.mig.files.length > 0, 'plan-migration: migrations found and ordered', `${a.mig.system}, ${a.mig.files.length} files`);
   reset();
+  await ready();
   const s0 = psql(schemaSql);
   log(s0.code === 0, 'old project: schema from the app migrations', s0.code ? firstError(s0.err) : '');
   let e = env();
