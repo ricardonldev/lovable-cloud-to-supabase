@@ -76,7 +76,9 @@ export async function extract(file, opts) {
   const rl = createInterface({ input, crlfDelay: Infinity });
 
   const kept = [], skipped = [];
-  let objects = 0;
+  let objects = 0, dropped = 0;
+  // functions that call Edge Functions through a written-in project URL: they would keep calling the OLD project
+  const hardcodedUrls = [];
   let copy = null; // { table, keep, rows, cols }
   let insert = null; // { keep, text }
   // schema mode: pg_dump writes a "-- Name: x; Type: T; Schema: s; Owner: o" header before each object
@@ -84,7 +86,8 @@ export async function extract(file, opts) {
   const flushEntry = () => {
     // On Supabase-managed tables, keep only what the app added (it points to the app's own functions or roles);
     // Supabase's internal triggers already exist on the new project.
-    if (entry?.keep && entry.managed && !/\bpublic\.|auth\.uid\(\)|auth\.jwt\(\)|\bTO (authenticated|anon)\b/.test(entry.lines.join('\n'))) entry.keep = false;
+    if (entry?.keep && entry.name && /https:\/\/[a-z0-9]{20}\.supabase\.co\//.test(entry.lines.join('\n'))) hardcodedUrls.push(entry.name);
+    if (entry?.keep && entry.managed &&!/\bpublic\.|auth\.uid\(\)|auth\.jwt\(\)|\bTO (authenticated|anon)\b/.test(entry.lines.join('\n'))) entry.keep = false;
     // Buckets are rows of storage.buckets, not definitions: recreate them (skipping any that already exist)
     if (entry?.buckets) {
       const i = entry.lines.findIndex((l) => /^COPY storage\.buckets \(/.test(l));
@@ -122,14 +125,28 @@ export async function extract(file, opts) {
         // DEFAULT ACL: Supabase already sets these on every new project, and only its admin role may change them
         if (type === 'TABLE DATA' || type === 'SEQUENCE SET' || type === 'DEFAULT ACL') keep = false;
         else if (schemas.has(schema) && type !== 'SCHEMA') keep = true;
+        // the app's own extra schemas (not public, which every project has): CREATE SCHEMA plus its grants and comment
+        else if (type === 'SCHEMA' && schemas.has(name) && name !== 'public') keep = true;
+        else if ((type === 'ACL' || type === 'COMMENT') && /^SCHEMA /.test(name) && schemas.has(name.slice(7)) && name.slice(7) !== 'public') keep = true;
         // custom triggers and policies that the app adds on Supabase-managed tables (auth.users, storage.objects)
-        else if ((schema === 'auth' || schema === 'storage') && (type === 'TRIGGER' || type === 'POLICY')) { keep = true; managed = true; }
+        // and on pgmq queue tables (e.g. a trigger that wakes the email queue worker on every insert)
+        else if ((schema === 'auth' || schema === 'storage' || schema === 'pgmq') && (type === 'TRIGGER' || type === 'POLICY')) { keep = true; managed = true; }
         else if (type === 'EXTENSION') keep = true;
-        entry = { keep, managed, buckets: type === 'TABLE DATA' && schema === 'storage' && name === 'buckets', lines: [] };
+        // pgmq queues are plain tables in the dump, but on a new project they must be created with pgmq.create()
+        // (it makes the q_ and a_ tables, their sequences and the pgmq.meta row). The archive tables come with it.
+        if (schema === 'pgmq' && type === 'TABLE' && /^q_./.test(name)) { w(`SELECT pgmq.create('${name.slice(2)}');\n`); objects++; }
+        entry = { keep, managed, name: type === 'FUNCTION' ? `${schema}.${name}` : null, buckets:type === 'TABLE DATA' && schema === 'storage' && name === 'buckets', lines: [] };
         continue;
       }
       if (entry) {
+        const ext = line.match(/^CREATE EXTENSION (?:IF NOT EXISTS )?(\S+) WITH SCHEMA (\S+);/);
+        // the dump creates an extension's own schema (pgmq, vault...) as a separate SCHEMA entry, which is skipped here
+        if (ext && ext[2] !== 'pg_catalog') entry.lines.push(`CREATE SCHEMA IF NOT EXISTS ${ext[2]};`);
+        // Lovable Cloud's own roles (sandbox_exec, sandbox_exec_<old project ref>) do not exist on a new project:
+        // pg_dump keeps their grants but never the roles themselves, so these lines would stop the whole schema
+        if (/^(GRANT|REVOKE) .* (TO|FROM) sandbox_exec(_[a-z0-9]+)?;$/.test(line)) { dropped++; continue; }
         if (/^CREATE EXTENSION /.test(line)) entry.lines.push(line.replace(/^CREATE EXTENSION (?!IF NOT EXISTS)/, 'CREATE EXTENSION IF NOT EXISTS '));
+        else if (/^CREATE SCHEMA /.test(line)) entry.lines.push(line.replace(/^CREATE SCHEMA (?!IF NOT EXISTS)/, 'CREATE SCHEMA IF NOT EXISTS '));
         else entry.lines.push(line);
       }
       continue;
@@ -145,7 +162,9 @@ export async function extract(file, opts) {
       }
       copy.rows++;
       if (copy.keep) {
-        if (opts.inserts) w(`INSERT INTO ${copy.target} (${copy.cols}) VALUES (${line.split('\t').map(copyValueToSql).join(', ')});\n`);
+        // OVERRIDING SYSTEM VALUE: "GENERATED ALWAYS AS IDENTITY" columns refuse explicit ids in an INSERT (COPY
+        // accepts them); it is valid on any table, so it is always added (found with a real Lovable app)
+        if (opts.inserts) w(`INSERT INTO ${copy.target} (${copy.cols}) OVERRIDING SYSTEM VALUE VALUES (${line.split('\t').map(copyValueToSql).join(', ')});\n`);
         else w(line + '\n');
       }
       continue;
@@ -184,7 +203,7 @@ export async function extract(file, opts) {
   }
   if (mode === 'schema') flushEntry();
   else { if (opts.inserts) w('COMMIT;\n'); w('SET session_replication_role = origin;\n'); }
-  return { kept, skipped, objects };
+  return { kept, skipped, objects, dropped, hardcodedUrls };
 }
 
 if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
@@ -202,7 +221,10 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
   try {
     const r = await extract(file, { mode: val('--mode') || 'data', inserts: args.includes('--inserts'), clear: !args.includes('--no-clear'), schemas: list('--schemas'), authTables: list('--auth-tables'), exclude: list('--exclude'), write: (s) => ws.write(s) });
     await new Promise((res) => ws.end(res));
-    if ((val('--mode') || 'data') === 'schema') console.log(`${r.objects} objects written to ${out}`);
+    if ((val('--mode') || 'data') === 'schema') {
+      console.log(`${r.objects} objects written to ${out}${r.dropped ? ` (${r.dropped} grants to Lovable-only roles left out)` : ''}`);
+      if (r.hardcodedUrls.length) console.log(`\nWARNING: ${r.hardcodedUrls.length} function(s) call a project URL written in the code, which still points to the OLD project. Change it to the new project's URL after loading the schema:\n  ${r.hardcodedUrls.join('\n  ')}`);
+    }
     else {
       console.log(`Written to ${out}\n\nIncluded:`);
       for (const t of r.kept) console.log(`  ${t.table}: ${t.rows} rows`);

@@ -143,7 +143,7 @@ test('plan: sample rows inserted by migrations (not inside functions or comments
 });
 test('extract --inserts: COPY rows become INSERTs with correct escaping', async () => {
   const { out } = await run(dumpFile, { inserts: true });
-  assert.match(out, /INSERT INTO public\.notes \(id, body\) VALUES \('1', 'tab\there, quote '' and line\nbreak'\);/);
+  assert.match(out, /INSERT INTO public\.notes \(id, body\) OVERRIDING SYSTEM VALUE VALUES \('1', 'tab\there, quote '' and line\nbreak'\);/);
   assert.match(out, /VALUES \('2', NULL\);/);
   assert.match(out, /VALUES \('3', 'back\\slash ñ'\);/);
   assert.match(out, /^BEGIN;$/m);
@@ -161,6 +161,69 @@ test('extract --mode schema: app objects only; Supabase internals and default AC
   assert.doesNotMatch(out, /COPY /);
   assert.match(out, /CREATE EXTENSION IF NOT EXISTS pgcrypto/);
   assert.match(out, /INSERT INTO storage\.buckets \(id, name, public, file_size_limit, allowed_mime_types\) VALUES \('invoices', 'invoices', 'f', NULL, NULL\) ON CONFLICT \(id\) DO NOTHING;/);
+});
+test('extract --mode schema: extension schemas are created first and pgmq queues are recreated with pgmq.create', async () => {
+  // found with a real Lovable app (20/10/2026): CREATE EXTENSION pgmq WITH SCHEMA pgmq failed on a new project
+  const f = join(tmp, 'pgmq.sql');
+  writeFileSync(f, [
+    '--', '-- Name: pgmq; Type: SCHEMA; Schema: -; Owner: postgres', '--', '', 'CREATE SCHEMA pgmq;', '',
+    '--', '-- Name: pgmq; Type: EXTENSION; Schema: -; Owner: -', '--', '', 'CREATE EXTENSION IF NOT EXISTS pgmq WITH SCHEMA pgmq;', '',
+    '--', '-- Name: a_auth_emails; Type: TABLE; Schema: pgmq; Owner: postgres', '--', '', 'CREATE TABLE pgmq.a_auth_emails (', '    msg_id bigint NOT NULL', ');', '',
+    '--', '-- Name: q_auth_emails; Type: TABLE; Schema: pgmq; Owner: postgres', '--', '', 'CREATE TABLE pgmq.q_auth_emails (', '    msg_id bigint NOT NULL', ');', '',
+    '--', '-- Name: q_auth_emails_dlq; Type: TABLE; Schema: pgmq; Owner: postgres', '--', '', 'CREATE TABLE pgmq.q_auth_emails_dlq (', '    msg_id bigint NOT NULL', ');', '',
+    '--', '-- Name: q_auth_emails_msg_id_seq; Type: SEQUENCE; Schema: pgmq; Owner: postgres', '--', '', 'CREATE SEQUENCE pgmq.q_auth_emails_msg_id_seq;', '',
+    '',
+  ].join('\n'));
+  const { out } = await run(f, { mode: 'schema' });
+  assert.match(out, /CREATE SCHEMA IF NOT EXISTS pgmq;\nCREATE EXTENSION IF NOT EXISTS pgmq WITH SCHEMA pgmq;/);
+  assert.equal((out.match(/SELECT pgmq\.create\('auth_emails'\);/g) || []).length, 1);
+  assert.equal((out.match(/SELECT pgmq\.create\('auth_emails_dlq'\);/g) || []).length, 1);
+  assert.doesNotMatch(out, /CREATE TABLE pgmq\./);
+  assert.doesNotMatch(out, /CREATE SEQUENCE pgmq\./);
+});
+test('extract --mode schema: the app\'s triggers on pgmq queue tables are kept, after the queue exists', async () => {
+  // found with a real Lovable app (21/10/2026): the trigger that wakes the email worker was lost, so emails
+  // would have stayed in the queue on the new project
+  const f = join(tmp, 'pgmq-trigger.sql');
+  writeFileSync(f, [
+    '--', '-- Name: q_auth_emails; Type: TABLE; Schema: pgmq; Owner: postgres', '--', '', 'CREATE TABLE pgmq.q_auth_emails (', '    msg_id bigint NOT NULL', ');', '',
+    '--', '-- Name: email_queue_wake(); Type: FUNCTION; Schema: public; Owner: postgres', '--', '', 'CREATE FUNCTION public.email_queue_wake() RETURNS trigger', '    LANGUAGE plpgsql', '    AS $$ BEGIN RETURN NULL; END $$;', '',
+    '--', '-- Name: q_auth_emails email_queue_wake_auth; Type: TRIGGER; Schema: pgmq; Owner: postgres', '--', '', 'CREATE TRIGGER email_queue_wake_auth AFTER INSERT ON pgmq.q_auth_emails FOR EACH STATEMENT EXECUTE FUNCTION public.email_queue_wake();', '',
+    '--', '-- Name: meta pgmq_internal; Type: TRIGGER; Schema: pgmq; Owner: postgres', '--', '', 'CREATE TRIGGER pgmq_internal AFTER INSERT ON pgmq.meta FOR EACH ROW EXECUTE FUNCTION pgmq.internal_fn();', '',
+    '',
+  ].join('\n'));
+  const { out } = await run(f, { mode: 'schema' });
+  const create = out.indexOf("SELECT pgmq.create('auth_emails');");
+  const trigger = out.indexOf('CREATE TRIGGER email_queue_wake_auth AFTER INSERT ON pgmq.q_auth_emails');
+  assert.ok(create >= 0 && trigger > create, 'the wake trigger is kept and comes after pgmq.create');
+  // a trigger that only calls pgmq's own functions is the extension's, not the app's
+  assert.doesNotMatch(out, /pgmq_internal/);
+});
+test('extract --mode schema: warns about functions that call a written-in project URL', async () => {
+  // found with a real Lovable app (21/10/2026): 5 functions posted to the old project's Edge Functions
+  const f = join(tmp, 'urls.sql');
+  writeFileSync(f, [
+    '--', '-- Name: email_queue_dispatch(); Type: FUNCTION; Schema: public; Owner: postgres', '--', '',
+    'CREATE FUNCTION public.email_queue_dispatch() RETURNS void', '    LANGUAGE plpgsql', '    AS $$', 'BEGIN',
+    "  PERFORM net.http_post(url := 'https://abcdefghijklmnopqrst.supabase.co/functions/v1/process-email-queue');", 'END;', '$$;', '',
+    '--', '-- Name: plain(); Type: FUNCTION; Schema: public; Owner: postgres', '--', '', 'CREATE FUNCTION public.plain() RETURNS int', '    LANGUAGE sql', '    AS $$ SELECT 1 $$;', '',
+    '',
+  ].join('\n'));
+  const { r } = await run(f, { mode: 'schema' });
+  assert.deepEqual(r.hardcodedUrls, ['public.email_queue_dispatch()']);
+});
+test('extract --mode schema: grants to Lovable-only roles are left out, the rest of the ACL stays', async () => {
+  const f = join(tmp, 'sandbox.sql');
+  writeFileSync(f, [
+    '--', '-- Name: TABLE notes; Type: ACL; Schema: public; Owner: postgres', '--', '',
+    'GRANT ALL ON TABLE public.notes TO service_role;',
+    'GRANT SELECT,INSERT ON TABLE public.notes TO sandbox_exec_abcdefghijklmnopqrst;',
+    'GRANT SELECT,INSERT ON TABLE public.notes TO sandbox_exec;', '',
+  ].join('\n'));
+  const { out, r } = await run(f, { mode: 'schema' });
+  assert.match(out, /GRANT ALL ON TABLE public\.notes TO service_role;/);
+  assert.doesNotMatch(out, /sandbox_exec/);
+  assert.equal(r.dropped, 2);
 });
 test('extract: reads .gz exports and refuses custom-format dumps with instructions', async () => {
   const gz = join(tmp, 'export.sql.gz');
