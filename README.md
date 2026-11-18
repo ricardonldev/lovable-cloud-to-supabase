@@ -7,7 +7,7 @@ A small, tested toolkit to move a Lovable app from the built-in backend (**Lovab
 Lovable has no one-click transfer. Its [official guide](https://docs.lovable.dev/tips-tricks/external-deployment-hosting) lists what moves and how, but leaves the hard parts to you: importing the export, keeping users able to sign in, restoring files, and proving the result matches. These scripts cover exactly those parts. Every step is rehearsed end to end on a local Supabase in CI.
 
 ## When you need this
-- **Since October 5, 2026, each Lovable Cloud project runs on a single database** ([Lovable docs](https://docs.lovable.dev/features/environments)). Test and Live are retired, so what you try while building runs against your real data. With your own Supabase you can have separate development and production projects again.
+- **Since October 23, 2026, each Lovable Cloud project runs on a single database** ([Lovable docs](https://docs.lovable.dev/features/environments)). Test and Live are retired, so what you try while building runs against your real data. With your own Supabase you can have separate development and production projects again.
 - You need direct database access, your own backups and point-in-time recovery, a specific region, or clearer ownership before selling or handing over the app.
 
 ## What it does
