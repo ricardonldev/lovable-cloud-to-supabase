@@ -70,7 +70,7 @@ export function compare(before, after) {
 }
 
 export function report(r) {
-  const icon = { OK: '✅', FAIL: '❌', WARN: '⚠️' };
+  const icon = { OK: 'OK', FAIL: 'FAIL', WARN: 'WARN' };
   const fails = r.rows.filter((x) => x.estado === 'FAIL').length;
   let md = `# Migration check\n\n**${r.ok ? 'Everything that was in the old database is in the new one.' : `${fails} item(s) missing or different in the new project.`}**\n\n| | Item | Before | After |\n|---|---|---|---|\n`;
   const order = { FAIL: 0, WARN: 1, OK: 2 };

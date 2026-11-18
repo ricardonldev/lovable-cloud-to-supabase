@@ -235,7 +235,7 @@ try {
 }
 
 const passed = steps.filter((s) => s.ok).length;
-const md = `# Migration rehearsal: Lovable Cloud → own Supabase\n\n${new Date().toISOString().slice(0, 16).replace('T', ' ')} UTC · local Supabase (Docker) · made-up data only\n\n**${passed}/${steps.length} checks passed.**\n\n| | Check | Detail |\n|---|---|---|\n${steps.map((s) => `| ${s.ok ? '✅' : '❌'} | ${s.name} | ${s.detail.replace(/\|/g, '\\|')} |`).join('\n')}\n`;
+const md = `# Migration rehearsal: Lovable Cloud → own Supabase\n\n${new Date().toISOString().slice(0, 16).replace('T', ' ')} UTC · local Supabase (Docker) · made-up data only\n\n**${passed}/${steps.length} checks passed.**\n\n| | Check | Detail |\n|---|---|---|\n${steps.map((s) => `| ${s.ok ? 'OK' : 'FAIL'} | ${s.name} | ${s.detail.replace(/\|/g, '\\|')} |`).join('\n')}\n`;
 writeFileSync(outFile, md);
 console.log(`\n${passed}/${steps.length} passed. Report: ${outFile}`);
 process.exitCode = passed === steps.length ? 0 : 1;
