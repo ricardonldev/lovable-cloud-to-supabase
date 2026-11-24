@@ -52,6 +52,5 @@ node --test tests/     # unit tests, no Docker needed
 
 ## About
 Not affiliated with Lovable or Supabase. Built with AI assistance (Claude Code); every script is reviewed and tested by me, and the rehearsal runs on every push.
-Need this done for your app? I offer it as a fixed-price service on [Fiverr](https://www.fiverr.com/ricardonldev).
 
 MIT License.
